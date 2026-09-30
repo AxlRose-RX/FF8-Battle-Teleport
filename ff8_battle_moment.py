@@ -240,7 +240,7 @@ RESULT_TEXT = {0: "", 1: "misc", 2: "escaped", 3: "misc", 4: "won", 5: "?"}
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("FF8 Battle Teleport")
+        self.title(f"FF8 Battle Teleport v{APP_VERSION} - by AxlRose")
         self.geometry("560x640")
         self.minsize(480, 520)
 
