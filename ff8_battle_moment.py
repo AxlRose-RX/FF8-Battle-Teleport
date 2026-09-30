@@ -2,15 +2,16 @@
 """
 ff8_battle_moment.py
 
-Teleport-to-any-battle helper for FF8 (2000 US v1.2 with FFNx). Companion to
-the FF8 field & moment tool. Pick a battle id from the list, arm it, then
-trigger a battle in-game and you drop straight into that battle scene.
+Teleport-to-any-battle helper for FF8 (2000 US v1.2 with FFNx, and Remastered).
+Companion to the FF8 field & moment tool. Pick a battle id from the list, arm
+it, then trigger a battle in-game and you drop straight into that battle scene.
 
 How it works
 ------------
-FF8 keeps the current battle-scene id in a fixed WORD in memory
-(0x1CFF6E0 on the 2000 US v1.2 build). This tool freezes that value to the id
-you choose, so whatever battle you trigger loads the scene you selected.
+FF8 keeps the current battle-scene id at logical address 0x1CFF6E0 on the
+2000 US v1.2 build. This tool freezes that value to the id you choose, so
+whatever battle you trigger loads the scene you selected. Remastered resolves
+the same logical address through FFVIII_EFIGS.dll's page table.
 There is no FFNx "battle debug" menu (unlike Field Debug), so freezing the id
 is the equivalent.
 
@@ -32,26 +33,15 @@ list still opens so you can browse and copy ids.
 """
 
 import os
-import sys
 import json
 import threading
 import time
-from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog
 
-APP_VERSION = "2026.0927"   # release version (YYYY.MMDD); the GitHub build reads it from here
-
-
-def get_exe_dir():
-    """Folder of the running .exe (when frozen by PyInstaller) or of this script."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent
-
 # ---------------------------------------------------------------- addresses
-# FF8 2000 US v1.2 is a non-relocatable exe (loads at 0x400000), so these are
-# absolute virtual addresses, not module-relative offsets.
+# These are classic FF8 logical addresses. OG PC uses them directly;
+# Remastered translates them through FFVIII_EFIGS.dll's game-memory page table.
 GLOBAL_BATTLE_ENCOUNTER_ID = 0x1CFF6E0   # WORD: current battle scene id
 BATTLE_RESULT_STATE        = 0x1CFF6E7   # BYTE: 2 escaped, 4 won, other = misc
 
@@ -61,7 +51,8 @@ BATTLE_RESULT_STATE        = 0x1CFF6E7   # BYTE: 2 escaped, 4 won, other = misc
 BATTLE_ENCOUNTER_ID_ALT    = 0x0
 
 IMAGE_BASE_EXPECTED = 0x400000
-PROC_NAMES          = ["FF8.exe", "FF8_EN.exe"]
+REMASTERED_PAGE_TABLE_RVA = 0x188EDD0  # dword_1188EDD0 in FFVIII_EFIGS.dll
+PROC_NAMES          = ["FF8.exe", "FF8_EN.exe", "FFVIII.exe"]
 
 # ---------------------------------------------------------------- constants
 MAX_BATTLES  = 1024          # 0..1023 possible battle ids
@@ -84,9 +75,8 @@ def com_label(com):
 
 
 def load_labels():
-    """Load id -> label text from LABELS_FILE (bundled in _internal, or next to the script)."""
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(base, LABELS_FILE)
+    """Load id -> label text from LABELS_FILE next to this script (if present)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), LABELS_FILE)
     if not os.path.isfile(path):
         return {}
     try:
@@ -136,6 +126,8 @@ class Mem:
         self.log = log
         self.base = None
         self.name = None
+        self.is_remastered = False
+        self.page_table_address = None
 
     def attached(self):
         return self.pm is not None
@@ -166,13 +158,29 @@ class Mem:
         except Exception:
             self.base = None
 
+        if self.name.lower() == "ffviii.exe":
+            try:
+                from pymem.process import module_from_name
+                module = module_from_name(self.pm.process_handle, "FFVIII_EFIGS.dll")
+                if module is None:
+                    raise RuntimeError("FFVIII_EFIGS.dll is not loaded")
+                self.page_table_address = module.lpBaseOfDll + REMASTERED_PAGE_TABLE_RVA
+                self.is_remastered = True
+            except Exception as e:
+                self.pm = None
+                self.name = None
+                self.log(f"Could not locate FFVIII_EFIGS.dll page table: {e}")
+                return False
+
         try:
-            cur = self.pm.read_ushort(GLOBAL_BATTLE_ENCOUNTER_ID)
+            cur = self.pm.read_ushort(self.resolve_address(GLOBAL_BATTLE_ENCOUNTER_ID))
             self.log(f"Attached: {self.name} (PID {self.pm.process_id}). Current battle id: {cur}")
         except Exception as e:
             self.log(f"Attached: {self.name} (PID {self.pm.process_id}), but can't read encounter id: {e}")
 
-        if self.base not in (None, IMAGE_BASE_EXPECTED):
+        if self.is_remastered:
+            self.log("Remastered detected; game addresses will be resolved through FFVIII_EFIGS.dll.")
+        elif self.base not in (None, IMAGE_BASE_EXPECTED):
             self.log(f"Note: image base is 0x{self.base:X}, expected 0x{IMAGE_BASE_EXPECTED:X}. "
                      "Addresses assume the 2000 US v1.2 build; this may be a different version.")
         return True
@@ -181,12 +189,27 @@ class Mem:
         self.pm = None
         self.base = None
         self.name = None
+        self.is_remastered = False
+        self.page_table_address = None
+
+    def resolve_address(self, address):
+        if not self.is_remastered:
+            return address
+
+        page_index = address >> 12
+        try:
+            page_base = self.pm.read_uint(self.page_table_address + page_index * 4)
+        except Exception as e:
+            raise RuntimeError(f"Could not read Remastered page table: {e}") from e
+        if page_base == 0:
+            raise RuntimeError(f"Remastered address page 0x{page_index:X} is not mapped.")
+        return page_base + (address & 0xFFF)
 
     def read_id(self):
         if not self.pm:
             return None
         try:
-            return self.pm.read_ushort(GLOBAL_BATTLE_ENCOUNTER_ID)
+            return self.pm.read_ushort(self.resolve_address(GLOBAL_BATTLE_ENCOUNTER_ID))
         except Exception:
             return None
 
@@ -194,7 +217,7 @@ class Mem:
         if not self.pm:
             return None
         try:
-            return self.pm.read_uchar(BATTLE_RESULT_STATE)
+            return self.pm.read_uchar(self.resolve_address(BATTLE_RESULT_STATE))
         except Exception:
             return None
 
@@ -202,9 +225,9 @@ class Mem:
         if not self.pm:
             return False
         try:
-            self.pm.write_ushort(GLOBAL_BATTLE_ENCOUNTER_ID, val & 0xFFFF)
+            self.pm.write_ushort(self.resolve_address(GLOBAL_BATTLE_ENCOUNTER_ID), val & 0xFFFF)
             if BATTLE_ENCOUNTER_ID_ALT:
-                self.pm.write_ushort(BATTLE_ENCOUNTER_ID_ALT, val & 0xFFFF)
+                self.pm.write_ushort(self.resolve_address(BATTLE_ENCOUNTER_ID_ALT), val & 0xFFFF)
             return True
         except Exception:
             return False
@@ -217,18 +240,9 @@ RESULT_TEXT = {0: "", 1: "misc", 2: "escaped", 3: "misc", 4: "won", 5: "?"}
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f"FF8 Battle Teleport v{APP_VERSION} - by AxlRose")
+        self.title("FF8 Battle Teleport")
         self.geometry("560x640")
         self.minsize(480, 520)
-
-        # Set custom icon (icon.ico lives in the _internal bundle folder)
-        try:
-            base = Path(getattr(sys, "_MEIPASS", get_exe_dir()))
-            icon_path = base / "icon.ico"
-            if icon_path.exists():
-                self.iconbitmap(str(icon_path))
-        except Exception:
-            pass
 
         self.mem = Mem(self._log)
         self.labels = load_labels()
@@ -403,13 +417,14 @@ class App(tk.Tk):
 
     def _help(self):
         self._log(
-            "1) Start FF8 with FFNx, load any save.\n"
+            "1) Start FF8 with FFNx, or launch Remastered, and load any save.\n"
             "2) Attach to FF8.\n"
             "3) Pick a battle id, click Arm (freeze id).\n"
             "4) In FF8: press Ctrl+B (FFNx force-battle), then take a step on a field, "
             "or move on the worldmap. You load the armed battle.\n"
             "5) Change id and trigger again to cycle. Disarm to stop.\n"
-            "If the battle that loads doesn't match the armed id, report it on the Tsunamods Discord.")
+            "If the loaded battle does not match the armed id on your build, tell me and "
+            "we set BATTLE_ENCOUNTER_ID_ALT (the tool then freezes both addresses).")
 
     # ---- workers
     def _freeze_loop(self):
