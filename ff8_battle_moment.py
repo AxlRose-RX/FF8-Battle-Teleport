@@ -16,9 +16,10 @@ There is no FFNx "battle debug" menu (unlike Field Debug), so freezing the id
 is the equivalent.
 
 Trigger a battle with FFNx's built-in force-battle: press Ctrl+B in-game, then
-take a step on a field, or run around on the worldmap. Because the id is
-frozen, that battle loads as your selected id. Change the id, trigger again,
-repeat.
+take a step on a field, or run around on the worldmap. On the Remastered
+version without Junction VIII there's no Ctrl+B, so walk around until a
+random battle starts. Because the id is frozen, that battle loads as your
+selected id. Change the id, trigger again, repeat.
 
 Labels: ships with ff8_battle_labels.json (built from the Battle Ambience
 sheet), so each id reads like "0000  G-Soldier (Dollet)". Keep that file next
@@ -33,11 +34,22 @@ list still opens so you can browse and copy ids.
 """
 
 import os
+import sys
 import json
 import threading
 import time
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog
+
+APP_VERSION = "2026.1001"   # release version (YYYY.MMDD); the GitHub build reads it from here
+
+
+def get_exe_dir():
+    """Folder of the running .exe (when frozen by PyInstaller) or of this script."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
 
 # ---------------------------------------------------------------- addresses
 # These are classic FF8 logical addresses. OG PC uses them directly;
@@ -75,8 +87,9 @@ def com_label(com):
 
 
 def load_labels():
-    """Load id -> label text from LABELS_FILE next to this script (if present)."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), LABELS_FILE)
+    """Load id -> label text from LABELS_FILE (bundled in _internal, or next to the script)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(base, LABELS_FILE)
     if not os.path.isfile(path):
         return {}
     try:
@@ -133,6 +146,7 @@ class Mem:
         return self.pm is not None
 
     def attach(self):
+        self.detach()   # start clean, nothing from an earlier attach carries over
         try:
             import pymem
         except ImportError:
@@ -243,6 +257,15 @@ class App(tk.Tk):
         self.title(f"FF8 Battle Teleport v{APP_VERSION} - by AxlRose")
         self.geometry("560x640")
         self.minsize(480, 520)
+
+        # Set custom icon (icon.ico lives in the _internal bundle folder)
+        try:
+            base = Path(getattr(sys, "_MEIPASS", get_exe_dir()))
+            icon_path = base / "icon.ico"
+            if icon_path.exists():
+                self.iconbitmap(str(icon_path))
+        except Exception:
+            pass
 
         self.mem = Mem(self._log)
         self.labels = load_labels()
@@ -391,7 +414,10 @@ class App(tk.Tk):
         self._armed = True
         self.mem.write_id(bid)
         self.armed_var.set(f"ARMED  {bid:04d}")
-        self._log(f"Armed battle {bid}. In FF8: press Ctrl+B, then take a step to trigger it.")
+        if self.mem.is_remastered:
+            self._log(f"Armed battle {bid}. In FF8: walk around until a random battle starts.")
+        else:
+            self._log(f"Armed battle {bid}. In FF8: press Ctrl+B, then take a step to trigger it.")
 
     def _disarm(self):
         self._armed = False
@@ -421,10 +447,11 @@ class App(tk.Tk):
             "2) Attach to FF8.\n"
             "3) Pick a battle id, click Arm (freeze id).\n"
             "4) In FF8: press Ctrl+B (FFNx force-battle), then take a step on a field, "
-            "or move on the worldmap. You load the armed battle.\n"
+            "or move on the worldmap. On the Remastered version without Junction VIII "
+            "there's no Ctrl+B, so just walk around until a random battle starts. "
+            "You load the armed battle.\n"
             "5) Change id and trigger again to cycle. Disarm to stop.\n"
-            "If the loaded battle does not match the armed id on your build, tell me and "
-            "we set BATTLE_ENCOUNTER_ID_ALT (the tool then freezes both addresses).")
+            "If the battle that loads doesn't match the armed id, report it on the Tsunamods Discord.")
 
     # ---- workers
     def _freeze_loop(self):
