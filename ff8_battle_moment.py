@@ -2,22 +2,24 @@
 """
 ff8_battle_moment.py
 
-Teleport-to-any-battle helper for FF8 (2000 US v1.2 with FFNx). Companion to
-the FF8 field & moment tool. Pick a battle id from the list, arm it, then
-trigger a battle in-game and you drop straight into that battle scene.
+Teleport-to-any-battle helper for FF8 (2000 US v1.2 with FFNx, and Remastered).
+Companion to the FF8 field & moment tool. Pick a battle id from the list, arm
+it, then trigger a battle in-game and you drop straight into that battle scene.
 
 How it works
 ------------
-FF8 keeps the current battle-scene id in a fixed WORD in memory
-(0x1CFF6E0 on the 2000 US v1.2 build). This tool freezes that value to the id
-you choose, so whatever battle you trigger loads the scene you selected.
+FF8 keeps the current battle-scene id at logical address 0x1CFF6E0 on the
+2000 US v1.2 build. This tool freezes that value to the id you choose, so
+whatever battle you trigger loads the scene you selected. Remastered resolves
+the same logical address through FFVIII_EFIGS.dll's page table.
 There is no FFNx "battle debug" menu (unlike Field Debug), so freezing the id
 is the equivalent.
 
 Trigger a battle with FFNx's built-in force-battle: press Ctrl+B in-game, then
-take a step on a field, or run around on the worldmap. Because the id is
-frozen, that battle loads as your selected id. Change the id, trigger again,
-repeat.
+take a step on a field, or run around on the worldmap. On the Remastered
+version without Junction VIII there's no Ctrl+B, so walk around until a
+random battle starts. Because the id is frozen, that battle loads as your
+selected id. Change the id, trigger again, repeat.
 
 Labels: ships with ff8_battle_labels.json (built from the Battle Ambience
 sheet), so each id reads like "0000  G-Soldier (Dollet)". Keep that file next
@@ -40,7 +42,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog
 
-APP_VERSION = "2026.0927"   # release version (YYYY.MMDD); the GitHub build reads it from here
+APP_VERSION = "2026.1001"   # release version (YYYY.MMDD); the GitHub build reads it from here
 
 
 def get_exe_dir():
@@ -50,8 +52,8 @@ def get_exe_dir():
     return Path(__file__).resolve().parent
 
 # ---------------------------------------------------------------- addresses
-# FF8 2000 US v1.2 is a non-relocatable exe (loads at 0x400000), so these are
-# absolute virtual addresses, not module-relative offsets.
+# These are classic FF8 logical addresses. OG PC uses them directly;
+# Remastered translates them through FFVIII_EFIGS.dll's game-memory page table.
 GLOBAL_BATTLE_ENCOUNTER_ID = 0x1CFF6E0   # WORD: current battle scene id
 BATTLE_RESULT_STATE        = 0x1CFF6E7   # BYTE: 2 escaped, 4 won, other = misc
 
@@ -61,7 +63,8 @@ BATTLE_RESULT_STATE        = 0x1CFF6E7   # BYTE: 2 escaped, 4 won, other = misc
 BATTLE_ENCOUNTER_ID_ALT    = 0x0
 
 IMAGE_BASE_EXPECTED = 0x400000
-PROC_NAMES          = ["FF8.exe", "FF8_EN.exe"]
+REMASTERED_PAGE_TABLE_RVA = 0x188EDD0  # dword_1188EDD0 in FFVIII_EFIGS.dll
+PROC_NAMES          = ["FF8.exe", "FF8_EN.exe", "FFVIII.exe"]
 
 # ---------------------------------------------------------------- constants
 MAX_BATTLES  = 1024          # 0..1023 possible battle ids
@@ -136,11 +139,14 @@ class Mem:
         self.log = log
         self.base = None
         self.name = None
+        self.is_remastered = False
+        self.page_table_address = None
 
     def attached(self):
         return self.pm is not None
 
     def attach(self):
+        self.detach()   # start clean, nothing from an earlier attach carries over
         try:
             import pymem
         except ImportError:
@@ -166,13 +172,29 @@ class Mem:
         except Exception:
             self.base = None
 
+        if self.name.lower() == "ffviii.exe":
+            try:
+                from pymem.process import module_from_name
+                module = module_from_name(self.pm.process_handle, "FFVIII_EFIGS.dll")
+                if module is None:
+                    raise RuntimeError("FFVIII_EFIGS.dll is not loaded")
+                self.page_table_address = module.lpBaseOfDll + REMASTERED_PAGE_TABLE_RVA
+                self.is_remastered = True
+            except Exception as e:
+                self.pm = None
+                self.name = None
+                self.log(f"Could not locate FFVIII_EFIGS.dll page table: {e}")
+                return False
+
         try:
-            cur = self.pm.read_ushort(GLOBAL_BATTLE_ENCOUNTER_ID)
+            cur = self.pm.read_ushort(self.resolve_address(GLOBAL_BATTLE_ENCOUNTER_ID))
             self.log(f"Attached: {self.name} (PID {self.pm.process_id}). Current battle id: {cur}")
         except Exception as e:
             self.log(f"Attached: {self.name} (PID {self.pm.process_id}), but can't read encounter id: {e}")
 
-        if self.base not in (None, IMAGE_BASE_EXPECTED):
+        if self.is_remastered:
+            self.log("Remastered detected; game addresses will be resolved through FFVIII_EFIGS.dll.")
+        elif self.base not in (None, IMAGE_BASE_EXPECTED):
             self.log(f"Note: image base is 0x{self.base:X}, expected 0x{IMAGE_BASE_EXPECTED:X}. "
                      "Addresses assume the 2000 US v1.2 build; this may be a different version.")
         return True
@@ -181,12 +203,27 @@ class Mem:
         self.pm = None
         self.base = None
         self.name = None
+        self.is_remastered = False
+        self.page_table_address = None
+
+    def resolve_address(self, address):
+        if not self.is_remastered:
+            return address
+
+        page_index = address >> 12
+        try:
+            page_base = self.pm.read_uint(self.page_table_address + page_index * 4)
+        except Exception as e:
+            raise RuntimeError(f"Could not read Remastered page table: {e}") from e
+        if page_base == 0:
+            raise RuntimeError(f"Remastered address page 0x{page_index:X} is not mapped.")
+        return page_base + (address & 0xFFF)
 
     def read_id(self):
         if not self.pm:
             return None
         try:
-            return self.pm.read_ushort(GLOBAL_BATTLE_ENCOUNTER_ID)
+            return self.pm.read_ushort(self.resolve_address(GLOBAL_BATTLE_ENCOUNTER_ID))
         except Exception:
             return None
 
@@ -194,7 +231,7 @@ class Mem:
         if not self.pm:
             return None
         try:
-            return self.pm.read_uchar(BATTLE_RESULT_STATE)
+            return self.pm.read_uchar(self.resolve_address(BATTLE_RESULT_STATE))
         except Exception:
             return None
 
@@ -202,9 +239,9 @@ class Mem:
         if not self.pm:
             return False
         try:
-            self.pm.write_ushort(GLOBAL_BATTLE_ENCOUNTER_ID, val & 0xFFFF)
+            self.pm.write_ushort(self.resolve_address(GLOBAL_BATTLE_ENCOUNTER_ID), val & 0xFFFF)
             if BATTLE_ENCOUNTER_ID_ALT:
-                self.pm.write_ushort(BATTLE_ENCOUNTER_ID_ALT, val & 0xFFFF)
+                self.pm.write_ushort(self.resolve_address(BATTLE_ENCOUNTER_ID_ALT), val & 0xFFFF)
             return True
         except Exception:
             return False
@@ -377,7 +414,10 @@ class App(tk.Tk):
         self._armed = True
         self.mem.write_id(bid)
         self.armed_var.set(f"ARMED  {bid:04d}")
-        self._log(f"Armed battle {bid}. In FF8: press Ctrl+B, then take a step to trigger it.")
+        if self.mem.is_remastered:
+            self._log(f"Armed battle {bid}. In FF8: walk around until a random battle starts.")
+        else:
+            self._log(f"Armed battle {bid}. In FF8: press Ctrl+B, then take a step to trigger it.")
 
     def _disarm(self):
         self._armed = False
@@ -403,11 +443,13 @@ class App(tk.Tk):
 
     def _help(self):
         self._log(
-            "1) Start FF8 with FFNx, load any save.\n"
+            "1) Start FF8 with FFNx, or launch Remastered, and load any save.\n"
             "2) Attach to FF8.\n"
             "3) Pick a battle id, click Arm (freeze id).\n"
             "4) In FF8: press Ctrl+B (FFNx force-battle), then take a step on a field, "
-            "or move on the worldmap. You load the armed battle.\n"
+            "or move on the worldmap. On the Remastered version without Junction VIII "
+            "there's no Ctrl+B, so just walk around until a random battle starts. "
+            "You load the armed battle.\n"
             "5) Change id and trigger again to cycle. Disarm to stop.\n"
             "If the battle that loads doesn't match the armed id, report it on the Tsunamods Discord.")
 

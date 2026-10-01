@@ -8,7 +8,7 @@ Every battle id from 0000 to 1023 is listed, most of them with a readable name l
 
 It's a testing tool for modders, not a trainer. The only thing it changes in the game's memory is the id of the next battle, and only while a battle is armed. Disarm it and encounters go back to normal.
 
-It has only been tested with FFNx and the Junction VIII mod manager, on Final Fantasy VIII Remastered and the original 2013 Steam version, and those are the only setups it supports.
+It has been tested with FFNx and the Junction VIII mod manager, on Final Fantasy VIII Remastered and the original 2013 Steam version, and with Final Fantasy VIII Remastered launched on its own, without Junction VIII. Those are the only setups it supports.
 
 ## Download
 
@@ -18,10 +18,10 @@ Because it writes to the game's memory, some antivirus programs may flag it. The
 
 ## How to use
 
-1. Start the game through Junction VIII and load a save.
+1. Start the game through Junction VIII (or just launch the Remastered version on its own) and load a save.
 2. Click **Attach to FF8**.
 3. Pick a battle and click **Arm (freeze id)**, or double-click it.
-4. In the game, press **Ctrl+B** (FFNx force battle), then take a step on a field or walk around on the world map. The battle you armed loads.
+4. In the game, press **Ctrl+B** (FFNx force battle), then take a step on a field or walk around on the world map. On the Remastered version without Junction VIII there's no Ctrl+B, so just walk around until a random battle starts. The battle you armed loads.
 5. Pick another battle and trigger again, or click **Disarm** to stop.
 
 ## Build it yourself
@@ -30,6 +30,6 @@ Download **Source code (zip)** from any release, install [Python 3](https://www.
 
 ## Credits
 
-Made by AxlRose. Claude (Anthropic's AI) helped write the code. Battle names come from the Battle Ambience sheet by [mikedoesaudio](https://github.com/MikeHolmesAudio).
+Made by AxlRose. Claude (Anthropic's AI) helped write the code. [TrueOdin](https://github.com/julianxhokaxhiu) added support for the Remastered version without Junction VIII. Battle names come from the Battle Ambience sheet by [mikedoesaudio](https://github.com/MikeHolmesAudio).
 
 Questions and bug reports: [Tsunamods Discord](https://discord.com/invite/7Rsvsewghz)
